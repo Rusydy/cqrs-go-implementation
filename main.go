@@ -2,19 +2,30 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 	_ "github.com/lib/pq"
 )
 
-// Article represents an article.
-type Article struct {
+// Command represents a write operation command.
+type Command interface {
+	Validate() error
+}
+
+// Query represents a read operation query.
+type Query interface {
+	Validate() error
+}
+
+// ArticleWriteModel represents the write model for an article.
+type ArticleWriteModel struct {
 	ID      int       `json:"id"`
 	Author  string    `json:"author"`
 	Title   string    `json:"title"`
@@ -22,107 +33,77 @@ type Article struct {
 	Created time.Time `json:"created"`
 }
 
-// ArticleQuery represents a query to filter articles.
-type ArticleQuery struct {
-	Query  string `json:"query"`
-	Author string `json:"author"`
+// ArticleReadModel represents the read model for an article.
+type ArticleReadModel struct {
+	ID      int    `json:"id"`
+	Author  string `json:"author"`
+	Title   string `json:"title"`
+	Body    string `json:"body"`
+	Created string `json:"created"`
 }
 
-// CreateArticleCommand represents a command to create a new article.
+// CreateArticleCommand represents the command for creating an article.
 type CreateArticleCommand struct {
 	Author string `json:"author"`
 	Title  string `json:"title"`
 	Body   string `json:"body"`
 }
 
-// ArticleRepository provides an interface to interact with the article data store.
-type ArticleRepository interface {
-	Create(article *Article) error
-	List(query *ArticleQuery) ([]Article, error)
+// Validate validates the create article command.
+func (c *CreateArticleCommand) Validate() error {
+	if c.Author == "" {
+		return errors.New("author is required")
+	}
+	if c.Title == "" {
+		return errors.New("title is required")
+	}
+	if c.Body == "" {
+		return errors.New("body is required")
+	}
+	return nil
 }
 
-// SQLArticleRepository is an implementation of ArticleRepository using PostgreSQL.
-type SQLArticleRepository struct {
-	db *sql.DB
+// GetArticlesQuery represents the query for retrieving articles.
+type GetArticlesQuery struct {
+	Query  string `json:"query"`
+	Author string `json:"author"`
 }
 
-// Create creates a new article in the database.
-func (repo *SQLArticleRepository) Create(article *Article) error {
-	query := `
-		INSERT INTO articles (author, title, body, created)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`
+// Validate validates the get articles query.
+func (q *GetArticlesQuery) Validate() error {
+	return nil
+}
 
-	err := repo.db.QueryRow(query, article.Author, article.Title, article.Body, article.Created).Scan(&article.ID)
+// ArticleWriteRepository represents the repository for write operations on articles.
+type ArticleWriteRepository interface {
+	Create(article *ArticleWriteModel) error
+}
+
+// ArticleReadRepository represents the repository for read operations on articles.
+type ArticleReadRepository interface {
+	GetAll() ([]ArticleReadModel, error)
+}
+
+// ArticleWriteService represents the service for write operations on articles.
+type ArticleWriteService struct {
+	repo ArticleWriteRepository
+}
+
+// CreateArticle creates a new article.
+func (s *ArticleWriteService) CreateArticle(command *CreateArticleCommand) error {
+	err := command.Validate()
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-// List retrieves a list of articles from the database based on the query parameters.
-func (repo *SQLArticleRepository) List(query *ArticleQuery) ([]Article, error) {
-	whereClauses := make([]string, 0)
-	params := make([]interface{}, 0)
-
-	if query.Query != "" {
-		whereClauses = append(whereClauses, "(LOWER(title) LIKE $1 OR LOWER(body) LIKE $1)")
-		params = append(params, "%"+strings.ToLower(query.Query)+"%")
-	}
-
-	if query.Author != "" {
-		whereClauses = append(whereClauses, "LOWER(author) = $2")
-		params = append(params, strings.ToLower(query.Author))
-	}
-
-	whereClause := ""
-	if len(whereClauses) > 0 {
-		whereClause = "WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	queryStr := `
-		SELECT id, author, title, body, created
-		FROM articles
-		` + whereClause + `
-		ORDER BY created DESC
-	`
-
-	rows, err := repo.db.Query(queryStr, params...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	articles := make([]Article, 0)
-	for rows.Next() {
-		var article Article
-		err := rows.Scan(&article.ID, &article.Author, &article.Title, &article.Body, &article.Created)
-		if err != nil {
-			return nil, err
-		}
-		articles = append(articles, article)
-	}
-
-	return articles, nil
-}
-
-// ArticleService provides an interface to interact with articles.
-type ArticleService struct {
-	repo ArticleRepository
-}
-
-// CreateArticle creates a new article.
-func (s *ArticleService) CreateArticle(command *CreateArticleCommand) error {
-	article := &Article{
+	article := &ArticleWriteModel{
 		Author:  command.Author,
 		Title:   command.Title,
 		Body:    command.Body,
 		Created: time.Now(),
 	}
 
-	err := s.repo.Create(article)
+	err = s.repo.Create(article)
 	if err != nil {
 		return err
 	}
@@ -130,9 +111,19 @@ func (s *ArticleService) CreateArticle(command *CreateArticleCommand) error {
 	return nil
 }
 
-// GetArticles returns a list of articles based on the query parameters.
-func (s *ArticleService) GetArticles(query *ArticleQuery) ([]Article, error) {
-	articles, err := s.repo.List(query)
+// ArticleReadService represents the service for read operations on articles.
+type ArticleReadService struct {
+	repo ArticleReadRepository
+}
+
+// GetArticles retrieves a list of articles.
+func (s *ArticleReadService) GetArticles(query *GetArticlesQuery) ([]ArticleReadModel, error) {
+	err := query.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	articles, err := s.repo.GetAll()
 	if err != nil {
 		return nil, err
 	}
@@ -140,19 +131,85 @@ func (s *ArticleService) GetArticles(query *ArticleQuery) ([]Article, error) {
 	return articles, nil
 }
 
-// ErrorHandler handles errors and sends appropriate HTTP responses.
-func ErrorHandler(err error, c echo.Context) {
-	code := http.StatusInternalServerError
-	message := http.StatusText(code)
+// ArticleWriteRepositoryImpl represents the PostgreSQL repository for write operations on articles.
+type ArticleWriteRepositoryImpl struct {
+	db *sql.DB
+}
 
-	if he, ok := err.(*echo.HTTPError); ok {
-		code = he.Code
-		message = he.Message.(string)
+// Create creates a new article in the PostgreSQL database.
+func (r *ArticleWriteRepositoryImpl) Create(article *ArticleWriteModel) error {
+	// Perform the create operation on the database
+	_, err := r.db.Exec("INSERT INTO articles(author, title, body, created) VALUES($1, $2, $3, $4)",
+		article.Author, article.Title, article.Body, article.Created)
+	if err != nil {
+		return err
 	}
 
-	c.JSON(code, map[string]interface{}{
-		"error": message,
-	})
+	return nil
+}
+
+// ArticleReadRepositoryImpl represents the PostgreSQL repository for read operations on articles.
+type ArticleReadRepositoryImpl struct {
+	db *sql.DB
+}
+
+// GetAll retrieves all articles from the PostgreSQL database.
+func (r *ArticleReadRepositoryImpl) GetAll() ([]ArticleReadModel, error) {
+	// Perform the query operation on the database
+	rows, err := r.db.Query("SELECT id, author, title, body, created FROM articles ORDER BY created DESC")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	articles := make([]ArticleReadModel, 0)
+	for rows.Next() {
+		var article ArticleReadModel
+		err := rows.Scan(&article.ID, &article.Author, &article.Title, &article.Body, &article.Created)
+		if err != nil {
+			return nil, err
+		}
+
+		articles = append(articles, article)
+	}
+
+	return articles, nil
+}
+
+// ArticleHandler represents the HTTP handler for articles.
+type ArticleHandler struct {
+	writeService *ArticleWriteService
+	readService  *ArticleReadService
+}
+
+// CreateArticle handles the creation of a new article.
+func (h *ArticleHandler) CreateArticle(c echo.Context) error {
+	command := new(CreateArticleCommand)
+	if err := c.Bind(command); err != nil {
+		return c.JSON(http.StatusBadRequest, "Invalid request payload")
+	}
+
+	err := h.writeService.CreateArticle(command)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, "Failed to create article")
+	}
+
+	return c.JSON(http.StatusCreated, "Article created successfully")
+}
+
+// GetArticles handles the retrieval of articles.
+func (h *ArticleHandler) GetArticles(c echo.Context) error {
+	query := new(GetArticlesQuery)
+	if err := c.Bind(query); err != nil {
+		return c.JSON(http.StatusBadRequest, "Invalid request query")
+	}
+
+	articles, err := h.readService.GetArticles(query)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, "Failed to retrieve articles")
+	}
+
+	return c.JSON(http.StatusOK, articles)
 }
 
 func main() {
@@ -173,47 +230,50 @@ func main() {
 	}
 	defer db.Close()
 
-	// Initialize the article repository
-	repo := &SQLArticleRepository{db: db}
+	// Create instances of the repositories
+	writeRepo := &ArticleWriteRepositoryImpl{db: db}
+	readRepo := &ArticleReadRepositoryImpl{db: db}
 
-	// Initialize the article service
-	service := &ArticleService{repo: repo}
+	// Create instances of the services
+	writeService := &ArticleWriteService{repo: writeRepo}
+	readService := &ArticleReadService{repo: readRepo}
 
-	// Initialize the Echo router
+	// Create an instance of the article handler
+	articleHandler := &ArticleHandler{
+		writeService: writeService,
+		readService:  readService,
+	}
+
+	// Initialize the Echo instance
 	e := echo.New()
 
-	// Define the HTTP endpoints
-	e.POST("/articles", func(c echo.Context) error {
-		var command CreateArticleCommand
-		if err := c.Bind(&command); err != nil {
-			return err
+	// Middleware
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+
+	// Define the HTTP routes
+	e.POST("/articles", articleHandler.CreateArticle)
+	e.GET("/articles", articleHandler.GetArticles)
+
+	// Error handling middleware
+	e.HTTPErrorHandler = func(err error, c echo.Context) {
+		code := http.StatusInternalServerError
+		message := "Internal Server Error"
+
+		// Check if it's an Echo HTTPError
+		if he, ok := err.(*echo.HTTPError); ok {
+			code = he.Code
+			message = he.Message.(string)
 		}
 
-		if err := service.CreateArticle(&command); err != nil {
-			return err
+		// Send error response and handle the error
+		if err := c.JSON(code, map[string]interface{}{
+			"error": message,
+		}); err != nil {
+			log.Println("Failed to send error response:", err)
 		}
+	}
 
-		return c.JSON(http.StatusCreated, command)
-	})
-
-	e.GET("/articles", func(c echo.Context) error {
-		query := &ArticleQuery{
-			Query:  c.QueryParam("query"),
-			Author: c.QueryParam("author"),
-		}
-
-		articles, err := service.GetArticles(query)
-		if err != nil {
-			return err
-		}
-
-		return c.JSON(http.StatusOK, articles)
-	})
-
-	// Register the error handler
-	e.HTTPErrorHandler = ErrorHandler
-
-	// Start the HTTP server
-	fmt.Println("Server listening on port 8000")
-	log.Fatal(e.Start(":8000"))
+	// Start the server
+	e.Logger.Fatal(e.Start(":" + os.Getenv("APP_PORT")))
 }

@@ -1,100 +1,137 @@
 package main
 
 import (
-	"errors"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 )
 
-// MockArticleRepository is a mock implementation of the ArticleRepository interface.
-type MockArticleRepository struct {
-	createCalled   bool
-	listCalled     bool
-	createError    error
-	listError      error
-	listResult     []Article
-	expectedCreate *Article
-	expectedQuery  *ArticleQuery
+// MockWriteRepository represents a mock repository for write operations on articles.
+type MockWriteRepository struct {
+	articles []*ArticleWriteModel
 }
 
-func (m *MockArticleRepository) Create(article *Article) error {
-	m.createCalled = true
-	m.expectedCreate = article
-	return m.createError
+// Create adds a new article to the repository.
+func (r *MockWriteRepository) Create(article *ArticleWriteModel) error {
+	r.articles = append(r.articles, article)
+	return nil
 }
 
-func (m *MockArticleRepository) List(query *ArticleQuery) ([]Article, error) {
-	m.listCalled = true
-	m.expectedQuery = query
-	return m.listResult, m.listError
+// MockReadRepository represents a mock repository for read operations on articles.
+type MockReadRepository struct {
+	articles []*ArticleReadModel
 }
 
-func TestCreateArticle(t *testing.T) {
-	repo := &MockArticleRepository{}
-	service := &ArticleService{repo: repo}
+// GetAll retrieves all articles from the repository.
+func (r *MockReadRepository) GetAll() ([]ArticleReadModel, error) {
+	articles := make([]ArticleReadModel, len(r.articles))
+	for i, article := range r.articles {
+		articles[i] = *article
+	}
+	return articles, nil
+}
 
-	// Define the test case
-	command := &CreateArticleCommand{
-		Author: "John Doe",
-		Title:  "Test Article",
-		Body:   "This is a test article",
+func TestCreateArticleHandler(t *testing.T) {
+	// Create a mock write repository
+	mockWriteRepo := &MockWriteRepository{}
+
+	// Create an article handler with the mock repository
+	articleHandler := &ArticleHandler{
+		writeService: &ArticleWriteService{repo: mockWriteRepo},
 	}
 
-	// Execute the method
-	err := service.CreateArticle(command)
+	// Create a new Echo instance
+	e := echo.New()
 
-	// Assert the results
+	// Create a POST request with a JSON payload
+	req := httptest.NewRequest(http.MethodPost, "/articles", strings.NewReader(`{
+		"author": "John Doe",
+		"title": "Hello World",
+		"body": "This is the article body"
+	}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	// Invoke the CreateArticle handler
+	err := articleHandler.CreateArticle(c)
+
+	// Assert that no error occurred
 	assert.NoError(t, err)
-	assert.True(t, repo.createCalled)
-	assert.Equal(t, command.Author, repo.expectedCreate.Author)
-	assert.Equal(t, command.Title, repo.expectedCreate.Title)
-	assert.Equal(t, command.Body, repo.expectedCreate.Body)
+
+	// Assert that the response code is HTTP 201 Created
+	assert.Equal(t, http.StatusCreated, rec.Code)
+
+	// Assert that the article was added to the repository
+	assert.Equal(t, 1, len(mockWriteRepo.articles))
+	assert.Equal(t, "John Doe", mockWriteRepo.articles[0].Author)
+	assert.Equal(t, "Hello World", mockWriteRepo.articles[0].Title)
+	assert.Equal(t, "This is the article body", mockWriteRepo.articles[0].Body)
 }
 
-func TestGetArticles(t *testing.T) {
-	repo := &MockArticleRepository{
-		listResult: []Article{
-			{ID: 1, Author: "John Doe", Title: "Article 1", Body: "Body 1"},
-			{ID: 2, Author: "Jane Smith", Title: "Article 2", Body: "Body 2"},
+func TestGetArticlesHandler(t *testing.T) {
+	// Create a mock read repository with some articles
+	mockReadRepo := &MockReadRepository{
+		articles: []*ArticleReadModel{
+			{
+				ID:     1,
+				Author: "John Doe",
+				Title:  "Hello World",
+				Body:   "This is the article body",
+				// convert to string to match the JSON format
+				Created: time.Now().String(),
+			},
+			{
+				ID:      2,
+				Author:  "Jane Smith",
+				Title:   "Greetings",
+				Body:    "Welcome to the world",
+				Created: time.Now().String(),
+			},
 		},
 	}
-	service := &ArticleService{repo: repo}
 
-	// Define the test case
-	query := &ArticleQuery{
-		Query:  "test",
-		Author: "John Doe",
+	// Create an article handler with the mock repository
+	articleHandler := &ArticleHandler{
+		readService: &ArticleReadService{repo: mockReadRepo},
 	}
 
-	// Execute the method
-	articles, err := service.GetArticles(query)
+	// Create a new Echo instance
+	e := echo.New()
 
-	// Assert the results
+	// Create a GET request
+	req := httptest.NewRequest(http.MethodGet, "/articles", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	// Invoke the GetArticles handler
+	err := articleHandler.GetArticles(c)
+
+	// Assert that no error occurred
 	assert.NoError(t, err)
-	assert.True(t, repo.listCalled)
-	assert.Equal(t, query, repo.expectedQuery)
-	assert.Equal(t, repo.listResult, articles)
-}
 
-func TestGetArticles_Error(t *testing.T) {
-	repo := &MockArticleRepository{
-		listError: errors.New("list error"),
-	}
-	service := &ArticleService{repo: repo}
+	// Assert that the response code is HTTP 200 OK
+	assert.Equal(t, http.StatusOK, rec.Code)
 
-	// Define the test case
-	query := &ArticleQuery{
-		Query:  "test",
-		Author: "John Doe",
-	}
+	// Parse the response body
+	var response []ArticleReadModel
+	err = json.Unmarshal(rec.Body.Bytes(), &response)
 
-	// Execute the method
-	articles, err := service.GetArticles(query)
+	// Assert that the response body was parsed successfully
+	assert.NoError(t, err)
 
-	// Assert the error
-	assert.Error(t, err)
-	assert.Nil(t, articles)
-	assert.True(t, repo.listCalled)
-	assert.Equal(t, query, repo.expectedQuery)
+	// Assert that the correct number of articles were returned
+	assert.Equal(t, len(mockReadRepo.articles), len(response))
+
+	// Assert the contents of the first article
+	assert.Equal(t, mockReadRepo.articles[0].ID, response[0].ID)
+	assert.Equal(t, mockReadRepo.articles[0].Author, response[0].Author)
+	assert.Equal(t, mockReadRepo.articles[0].Title, response[0].Title)
+	assert.Equal(t, mockReadRepo.articles[0].Body, response[0].Body)
 }
