@@ -161,9 +161,10 @@ func main() {
 	dbPass := os.Getenv("DB_PASSWORD")
 	dbHost := os.Getenv("DB_HOST")
 	dbName := os.Getenv("DB_NAME")
+	dbPort := os.Getenv("DB_PORT")
 
 	// Construct the connection string
-	connStr := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbName)
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
 
 	// Initialize the PostgreSQL database connection
 	db, err := sql.Open("postgres", connStr)
@@ -192,7 +193,7 @@ func main() {
 			return err
 		}
 
-		return c.NoContent(http.StatusCreated)
+		return c.JSON(http.StatusCreated, command)
 	})
 
 	e.GET("/articles", func(c echo.Context) error {
